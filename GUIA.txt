@@ -1,0 +1,235 @@
+================================================================
+ SOCCER NOVA — Guía de implementación y personalización
+================================================================
+
+Stack: React 18 + Vite + TypeScript + framer-motion + Canvas 2D.
+Sin dependencias backend, sin estado persistente: todo corre 100%
+en el cliente.
+
+----------------------------------------------------------------
+1) CÓMO CORRERLO
+----------------------------------------------------------------
+   npm install
+   npm run dev       → desarrollo en http://localhost:5173
+   npm run build     → build de producción en /dist
+   npm run preview   → sirve el build localmente
+
+----------------------------------------------------------------
+2) ESTRUCTURA DEL PROYECTO
+----------------------------------------------------------------
+   index.html                     Entry HTML
+   src/
+   ├─ main.tsx                    Bootstrap React
+   ├─ App.tsx                     Router de pantallas (menu | game)
+   ├─ index.css                   Estilos globales
+   ├─ screens/
+   │  ├─ MenuScreen.tsx           Pantalla inicio (título animado, play)
+   │  └─ GameScreen.tsx           Pantalla de juego (canvas + HUD)
+   ├─ components/
+   │  └─ GameOverModal.tsx        Modal de fin de partida
+   └─ game/
+      ├─ config.ts                ⚙️ TODO LO TUNEABLE (leer primero)
+      ├─ types.ts                 Tipos del estado del juego
+      ├─ engine.ts                Lógica pura (spawn, movimiento, colisiones)
+      ├─ render.ts                Dibujo en canvas
+      ├─ useGameLoop.ts           Hook requestAnimationFrame
+      └─ useInput.ts              Hook mouse + flechas
+
+   Idea clave: `engine.ts` es lógica pura (no toca el DOM).
+   `render.ts` solo dibuja. `GameScreen.tsx` los pega usando hooks.
+   Esto permite cambiar gráficos sin tocar la lógica y viceversa.
+
+----------------------------------------------------------------
+3) CONTROLES
+----------------------------------------------------------------
+   • Mouse: el jugador sigue el cursor con suavizado.
+   • Flechas ← →  (o A / D): movimiento manual.
+   • El teclado tiene prioridad: mientras mantenés una flecha,
+     el mouse se ignora.
+
+----------------------------------------------------------------
+4) MODIFICAR EL JUEGO (src/game/config.ts)
+----------------------------------------------------------------
+   Todos los valores de balance, tamaños y assets viven ahí.
+
+   CANVAS
+     - width / height          → resolución interna del canvas
+     - groundY                 → altura del piso (donde camina el player)
+     - skyTop / skyBottom      → degradé del cielo
+     - groundColor / Stripe    → colores del campo
+
+   PLAYER
+     - emoji / ballEmoji       → emojis del personaje y la pelota
+     - size / ballSize         → tamaño en px
+     - keyboardSpeed           → velocidad con flechas (px/s)
+     - mouseEasing             → 0..1, qué tan rápido sigue al mouse
+     - hitboxRadius            → radio de colisión efectivo
+
+   STAR  (recompensa por defecto)
+     - fallSpeed [min, max]    → velocidad de caída
+     - spawnEvery              → segundos entre apariciones (inicio)
+     - points                  → puntos al recolectarla
+
+   RIVAL
+     - speed [min, max]        → velocidad horizontal
+     - spawnEvery              → frecuencia inicial de aparición
+
+   DIFFICULTY
+     - every                   → cada N segundos sube la dificultad
+     - spawnDecay              → multiplica los spawn intervals (<1 = más rápido)
+     - speedBoost              → +px/s a las velocidades por tier
+     - minStarSpawn / minRivalSpawn → pisos para no romper el balance
+
+   Ejemplos rápidos:
+     • Hacerlo más fácil:
+         RIVAL.spawnEvery = 4.0
+         RIVAL.speed = [180, 260]
+         DIFFICULTY.spawnDecay = 0.95
+     • Más adrenalina:
+         STAR.spawnEvery = 0.6
+         DIFFICULTY.every = 5
+         DIFFICULTY.speedBoost = 30
+     • Canvas más grande:
+         CANVAS.width = 1280
+         CANVAS.height = 720
+         CANVAS.groundY = 600
+
+----------------------------------------------------------------
+5) AGREGAR NUEVAS RECOMPENSAS
+----------------------------------------------------------------
+   Editá el array `REWARDS` en src/game/config.ts:
+
+     export const REWARDS: RewardDef[] = [
+       { id: "star",   emoji: "⭐", points: 10, weight: 8 },
+       { id: "gem",    emoji: "💎", points: 25, weight: 2 },
+       { id: "trophy", emoji: "🏆", points: 50, weight: 1 },
+       // Sumá la tuya:
+       { id: "boots",  emoji: "👟", points: 75, weight: 1, size: 44, hitboxRadius: 22 },
+     ];
+
+   Reglas:
+     • `weight` = probabilidad relativa (más alto = más común).
+     • `points` puede ser negativo (recompensa-trampa).
+     • `size` y `hitboxRadius` son opcionales (default 38 / 18).
+     • El motor las ramificará automáticamente por la ruleta de pesos.
+
+   Para hacer recompensas con comportamiento especial (ej: bonus
+   de tiempo, multiplicadores, escudos), agregá un campo nuevo
+   al tipo `RewardDef` y manejá el efecto en `engine.ts` dentro
+   del bloque `if (e.kind === "reward") { state.score += e.points; ... }`.
+
+----------------------------------------------------------------
+6) REEMPLAZAR LOS EMOJIS POR TUS IMÁGENES
+----------------------------------------------------------------
+   Por defecto se dibujan emojis con `ctx.fillText` (fuente del
+   sistema). Para usar imágenes propias hacé esto:
+
+   A) Colocá los archivos en /public/assets, por ejemplo:
+        public/assets/player.png
+        public/assets/ball.png
+        public/assets/star.png
+        public/assets/rival.png
+
+      Recomendaciones de assets:
+        • PNG con transparencia o WebP.
+        • Cuadrados (1:1), 128x128 o 256x256.
+        • Centrados en el lienzo (el motor los dibuja desde el centro).
+
+   B) Cargá las imágenes UNA sola vez (cache) y pasalas al render.
+      Editá src/game/render.ts y reemplazá las llamadas a
+      `drawEmoji(...)` por algo así:
+
+         // arriba del archivo:
+         const sprites: Record<string, HTMLImageElement> = {};
+         function getSprite(src: string) {
+           if (!sprites[src]) {
+             const img = new Image();
+             img.src = src;
+             sprites[src] = img;
+           }
+           return sprites[src];
+         }
+         function drawSprite(ctx, src, x, y, size, rotation = 0) {
+           const img = getSprite(src);
+           if (!img.complete) return;
+           ctx.save();
+           ctx.translate(x, y);
+           if (rotation) ctx.rotate(rotation);
+           ctx.drawImage(img, -size / 2, -size / 2, size, size);
+           ctx.restore();
+         }
+
+   C) En `config.ts`, cambiá los emojis por rutas:
+         PLAYER.emoji      = "/assets/player.png"
+         PLAYER.ballEmoji  = "/assets/ball.png"
+         REWARDS[0].emoji  = "/assets/star.png"
+         RIVAL.emoji       = "/assets/rival.png"
+
+      (El campo se llama `emoji` por historia, pero podés usarlo
+       como `src`. Si preferís separar, agregá un campo `sprite`
+       a los tipos y manejá ambos casos en render.ts.)
+
+   D) En `render.ts`, donde hoy hay:
+         drawEmoji(ctx, e.emoji, e.x, e.y, e.size, e.rotation);
+      usá en su lugar:
+         drawSprite(ctx, e.emoji, e.x, e.y, e.size, e.rotation);
+
+   Tip: si querés mezclar emojis e imágenes, detectá la cadena:
+         if (e.emoji.startsWith("/")) drawSprite(...)
+         else drawEmoji(...)
+
+----------------------------------------------------------------
+7) MODIFICAR EL MENÚ DE INICIO (MenuScreen.tsx)
+----------------------------------------------------------------
+   • Título: cambiá la constante TITLE arriba del componente.
+   • Colores del gradiente: el wrap usa `radial-gradient(...)`.
+   • Velocidad de las animaciones: cada motion tiene `transition`
+     con `duration` y `delay` ajustables.
+   • Estrellas de fondo: el `Array.from({ length: 18 })` define
+     cuántas caen. Subilo para más densidad.
+
+----------------------------------------------------------------
+8) MODIFICAR EL MODAL DE GAME OVER (GameOverModal.tsx)
+----------------------------------------------------------------
+   • Mensaje, emoji y colores se controlan en el JSX y en `styles`.
+   • Las animaciones de entrada/salida usan framer-motion
+     (`initial`, `animate`, `exit`).
+   • Si querés guardar récord:
+       - usá `localStorage.getItem("hiscore")` al montar el modal.
+       - actualizá si `score > hiscore`.
+
+----------------------------------------------------------------
+9) AGREGAR SONIDO (opcional, simple)
+----------------------------------------------------------------
+   1. Colocá los .mp3/.ogg en /public/audio.
+   2. En engine.ts, dentro de la colisión `e.kind === "reward"`:
+         new Audio("/audio/pickup.mp3").play().catch(() => {});
+   3. Para game over, igual con "/audio/gameover.mp3" cuando
+      `state.over` pase a true.
+   (Para algo más serio, usá Howler.js o una cache de Audio.)
+
+----------------------------------------------------------------
+10) IDEAS PARA EXTENDER
+----------------------------------------------------------------
+   • Niveles: cambiar background/colores cada N puntos.
+   • Power-ups: escudo temporal, slow-motion, imán de estrellas.
+   • Combos: multiplicador si agarrás N estrellas seguidas.
+   • Récord persistente: localStorage en GameOverModal.
+   • Touch controls: arrastrar sobre el canvas en mobile.
+   • Partículas al recolectar (dibujar circulitos en render.ts).
+
+----------------------------------------------------------------
+11) DÓNDE TOCAR PARA CADA CAMBIO (cheat-sheet)
+----------------------------------------------------------------
+   Balance / dificultad / spawn ............. src/game/config.ts
+   Nuevas recompensas ....................... src/game/config.ts (REWARDS)
+   Lógica de colisión / scoring ............. src/game/engine.ts
+   Gráficos del canvas (fondo, sprites) ..... src/game/render.ts
+   Controles del usuario .................... src/game/useInput.ts
+   Pantalla inicio (texto, animaciones) ..... src/screens/MenuScreen.tsx
+   HUD / layout durante el juego ............ src/screens/GameScreen.tsx
+   Modal de game over ....................... src/components/GameOverModal.tsx
+
+================================================================
+ ¡A romperla, crack! ⚽
+================================================================
